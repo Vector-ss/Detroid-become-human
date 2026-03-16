@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Detroit 2038 — 3D карта с динамическими маркерами</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.10.0/dist/maplibre-gl.css" />
+<script src="https://unpkg.com/maplibre-gl@5.10.0/dist/maplibre-gl.js"></script>
+
+<style>
+html, body { margin:0; padding:0; height:100%; background:#05070b; font-family:'Consolas', monospace; color:#00eaff; }
+#map { position:absolute; inset:0; }
+
+.table-btn { position:absolute; top:10px; left:10px; z-index:50; background:#050b12; border:1px solid #00eaff; color:#00eaff; padding:6px 12px; font-size:12px; cursor:pointer; border-radius:4px; }
+.table-btn:hover { background:#00eaff; color:#05070b; }
+
+.filter-btns { position:absolute; top:50px; left:10px; z-index:50; display:flex; gap:6px; flex-wrap:wrap; }
+.filter-btns button { padding:6px 10px; font-size:12px; border-radius:4px; border:1px solid #00eaff; background:#050b12; color:#00eaff; cursor:pointer; }
+.filter-btns button:hover { background:#00eaff; color:#05070b; }
+
+.modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; z-index:60; }
+.modal { background:#05070b; border:1px solid #00eaff; border-radius:8px; padding:16px; max-width:90%; max-height:80%; overflow:auto; color:#e0f7ff; font-size:13px; }
+.modal-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.modal-header h2 { margin:0; font-size:16px; text-transform:uppercase; letter-spacing:0.08em; }
+.modal-close { background:transparent; border:1px solid #00eaff; color:#00eaff; padding:4px 10px; cursor:pointer; border-radius:4px; font-size:12px; text-transform:uppercase; }
+
+table.events-table { width:100%; border-collapse:collapse; margin-top:8px; }
+table.events-table th, table.events-table td { border:1px solid #22313f; padding:4px 6px; text-align:left; font-size:12px; }
+table.events-table th { background:#0b1018; }
+table.events-table tr:nth-child(even) { background:#070c12; }
+
+.marker-container { display:flex; align-items:center; justify-content:center; width:24px; height:24px; }
+.marker-shape {
+  width: 0; 
+  height: 0; 
+  border-left: 12px solid transparent;
+  border-right: 12px solid transparent;
+  border-bottom: 20px solid #00eaff;
+  position: relative;
+  transition: transform 0.3s, box-shadow 0.3s;
+}
+.marker-shape::after {
+  content:'';
+  position:absolute; top:20px; left:-12px;
+  border-left:12px solid transparent;
+  border-right:12px solid transparent;
+  border-top:6px solid #0003;
+}
+.marker-popup { background:#00a6ff; color:#000; padding:6px 10px; border-radius:6px; font-size:12px; max-width:220px; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<button class="table-btn" id="openTableBtn">Открыть таблицу</button>
+
+<div class="filter-btns">
+  <button data-filter="all">Все</button>
+  <button data-filter="Коннор">Коннор</button>
+  <button data-filter="Маркус">Маркус</button>
+  <button data-filter="Кэра">Кэра</button>
+  <button data-filter="Все герои">Все герои</button>
+</div>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>События Detroit 2038</h2>
+      <button class="modal-close" id="closeTableBtn">Закрыть</button>
+    </div>
+    <table class="events-table">
+      <thead>
+        <tr>
+          <th>Глава</th>
+          <th>Персонаж</th>
+          <th>Дата/Время</th>
+          <th>Описание</th>
+        </tr>
+      </thead>
+      <tbody id="eventsTableBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const detroitCenter = [-83.0458, 42.3314];
+const map = new maplibregl.Map({
+  container:'map',
+  style:'https://tiles.openfreemap.org/styles/dark',
+  center:detroitCenter,
+  zoom:13.5,
+  pitch:60,
+  bearing:-20,
+  canvasContextAttributes:{ antialias:true }
+});
+map.addControl(new maplibregl.NavigationControl(),'top-right');
+
+map.on('load', () => {
+  map.addSource('openfreemap',{ type:'vector', url:'https://tiles.openfreemap.org/planet' });
+
+  map.addLayer({
+    id:'3d-buildings',
+    type:'fill-extrusion',
+    source:'openfreemap',
+    'source-layer':'building',
+    minzoom:13,
+    paint:{
+      'fill-extrusion-color':['interpolate',['linear'],['get','render_height'],0,'#0f1115',20,'#1b2230',40,'#22394d',70,'#005f85',110,'#00b7ff',150,'#00eaff'],
+      'fill-extrusion-height':['interpolate',['linear'],['zoom'],13,0,14,['*',['get','render_height'],1.4]],
+      'fill-extrusion-base':4,
+      'fill-extrusion-opacity':0.9
+    }
+  });
+
+  map.addLayer({
+    id:'neon-roads',
+    type:'line',
+    source:'openfreemap',
+    'source-layer':'transportation',
+    paint:{
+      'line-color':'#00a6c8',
+      'line-width':['interpolate',['linear'],['zoom'],10,0.3,14,1.1,17,2.5],
+      'line-blur':0.8,
+      'line-opacity':0.65
+    }
+  });
+});
+
+// === данные событий ===
+const locations = [
+  {chapter:'Парк Авеню 1554', character:'Коннор', coords:[42.333709,-83.047469], datetime:'15.08, 20:29', description:'Коннор прибывает на место по вызову; первая встреча с девиантом.'},
+  {chapter:'Дом Тода + Дом Карла', character:'Кэра / Маркус', coords:[42.349502,-83.042848], datetime:'05.11', description:'Маркус проходит через кризис в доме Карла и начинает меняться.'},
+  {chapter:'Дом Карла Ортиса', character:'Коннор', coords:[42.336116,-83.096394], datetime:'05.11, 23:21', description:'Коннор посещает дом Карла Ортиса в рамках расследования.'},
+  {chapter:'Полицейский участок, допрос', character:'Коннор', coords:[42.331230,-83.059594], datetime:'06.11', description:'Допрос и попытки наладить отношения с Хэнком в полицейском участке.'},
+  {chapter:'Беглянки', character:'Кэра', coords:[42.335558,-83.07433], datetime:'05-06.11', description:'Кэра и Алиса скрываются и пытаются выжить в Детройте.'},
+  {chapter:'Свалка', character:'Маркус', coords:[42.377001,-82.983022], datetime:'06.11, 03:34', description:'Маркус только становится девиантом.'},
+  {chapter:'Иерихон', character:'Маркус', coords:[42.358335,-82.928083], datetime:'06.11, 16–17:13', description:'Маркус достигает Иерихона, места сбора андроидов.'},
+  {chapter:'Гнездо', character:'Коннор', coords:[42.410592,-82.969308], datetime:'06.11, 15:02', description:'Место где жил один девиант.'},
+  {chapter:'Златко', character:'Кэра', coords:[42.369645,-83.019494], datetime:'06.11, 19:45', description:'Кэра сталкивается с Златко — ключевой угрозой её пути.'},
+  {chapter:'Русская рулетка', character:'Коннор', coords:[42.348864,-83.029188], datetime:'06.11, 19:51', description:'Конору ничего не угрожает.'},
+  {chapter:'Запчасти', character:'Маркус', coords:[42.353318,-82.982446], datetime:'06.11, 20:01', description:'Маркус и союзники собирают ресурсы для дальнейшего сопротивления.'},
+  {chapter:'Клуб Рай', character:'Коннор', coords:[42.328955,-83.050668], datetime:'06.11, 20:17', description:'Коннор ведёт расследование в ночном клубе; напряжение растёт.'},
+  {chapter:'Пиратская бухта', character:'Кэра', coords:[42.364925,-83.017506], datetime:'07.11, 01:02', description:'Заброшенный жуткий парк развлечений.'},
+  {chapter:'Мост', character:'Коннор', coords:[42.313830,-83.076607], datetime:'07.11, 01:19', description:'Коннор сталкивается с последствиями своих решений на мосту.'},
+  {chapter:'Башня Стредфорд', character:'Маркус', coords:[42.336445,-83.050857], datetime:'08.11, 13:30', description:'Стратегическая точка укрепления сопротивления андроидов.'},
+  {chapter:'Вне закона', character:'Коннор', coords:[42.336260,-83.051118], datetime:'08.11, 16:06', description:'Конор расследует нападение на башню, ему закон не угрожает.'},
+  {chapter:'Ночной поезд', character:'Кэра', coords:[42.555261,-82.955229], datetime:'08.11, 17:10', description:'Рассказывается о выборах для побега из США.'},
+  {chapter:'Кэпитол Парк', character:'Маркус', coords:[42.333688,-83.049697], datetime:'09.11, 01:51', description:'Маркус ведёт андроидов через центр Детройта под прикрытием ночи.'},
+  {chapter:'Встреча с Камски', character:'Коннор', coords:[42.342578,-82.958565], datetime:'09.11, 11:17', description:'Ключевой разговор с Камски, не прямо у башни CyberLife.'},
+  {chapter:'Марш свободы', character:'Маркус', coords:[42.334543,-83.049078], datetime:'09.11, 12:04', description:'Маркус организует массовый марш за права андроидов.'},
+  {chapter:'Последний шанс', character:'Коннор', coords:[42.331191,-83.059250], datetime:'09.11, 16:13', description:'Кульминационный момент для Коннора перед финалом.'},
+  {chapter:'Перепутье (Иерихон)', character:'Все герои', coords:[42.358335,-82.928083], datetime:'09.11, 21:34', description:'Поворотный момент, где пути героев пересекаются.'},
+  {chapter:'Башня Киберлайф', character:'Коннор', coords:[42.345483,-82.962890], datetime:'10.11, 19:18', description:'Атака на центр CyberLife.'},
+  {chapter:'Битва за Детройт', character:'Все герои', coords:[42.327976,-83.044920], datetime:'11.11, 22:46', description:'Финальные выборы, определяющие судьбу Детройта.'}
+];
+
+const eventsTableBody = document.getElementById('eventsTableBody');
+function fillTableFromLocations() {
+  eventsTableBody.innerHTML='';
+  locations.forEach(loc=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${loc.chapter}</td><td>${loc.character}</td><td>${loc.datetime}</td><td>${loc.description}</td>`;
+    eventsTableBody.appendChild(tr);
+  });
+}
+
+const modalBackdrop = document.getElementById('modalBackdrop');
+const openTableBtn = document.getElementById('openTableBtn');
+const closeTableBtn = document.getElementById('closeTableBtn');
+openTableBtn.addEventListener('click', ()=>{ fillTableFromLocations(); modalBackdrop.style.display='flex'; });
+closeTableBtn.addEventListener('click', ()=>{ modalBackdrop.style.display='none'; });
+modalBackdrop.addEventListener('click',(e)=>{ if(e.target===modalBackdrop) modalBackdrop.style.display='none'; });
+
+const markers=[];
+locations.forEach(loc=>{
+  const container=document.createElement('div');
+  container.className='marker-container';
+  const shape=document.createElement('div');
+  shape.className='marker-shape';
+  let color='#00eaff';
+  if(loc.character=='Маркус') color='#ff3b3b';
+  else if(loc.character=='Кэра') color='#00ff3b';
+  else if(loc.character=='Все герои') color='#ffd700';
+  shape.style.borderBottomColor=color;
+  container.appendChild(shape);
+
+  const popup=new maplibregl.Popup({ offset:25, closeOnClick:true })
+    .setHTML(`<div class="marker-popup"><strong>${loc.chapter}</strong><br>${loc.description}</div>`);
+
+  const marker=new maplibregl.Marker({ element:container, draggable:false })
+    .setLngLat([loc.coords[1], loc.coords[0]])
+    .setPopup(popup)
+    .addTo(map);
+
+  // клик: круглый свет
+  shape.addEventListener('click',()=>{
+    shape.style.transform='scale(1.5)';
+    shape.style.boxShadow=`0 0 20px 10px ${color}aa, 0 0 40px 20px ${color}55, 0 0 60px 30px ${color}33`;
+    setTimeout(()=>{ shape.style.transform='scale(1)'; shape.style.boxShadow=''; },800);
+  });
+
+  marker.character=loc.character;
+  markers.push(marker);
+});
+
+function updateMarkerScale(){
+  const zoom=map.getZoom();
+  const scale=Math.max(0.5, Math.min(1.5,(zoom-12)/2+0.5));
+  markers.forEach(marker=>{
+    const shape=marker.getElement().querySelector('.marker-shape');
+    if(shape) shape.style.transform=`scale(${scale})`;
+  });
+}
+map.on('zoom', updateMarkerScale);
+updateMarkerScale();
+
+// фильтры
+document.querySelectorAll('.filter-btns button').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const filter=btn.dataset.filter;
+    markers.forEach(marker=>{
+      marker.getElement().style.display=(filter==='all'||marker.character===filter)?'flex':'none';
+    });
+  });
+});
+
+// плавное затухание свечения при движении карты
+let animationFrame;
+map.on('move',()=>{
+  cancelAnimationFrame(animationFrame);
+  animationFrame=requestAnimationFrame(() => {
+    markers.forEach(marker=>{
+      const shape=marker.getElement().querySelector('.marker-shape');
+      if(shape) shape.style.boxShadow='';
+    });
+  });
+});
+</script>
+</body>
+</html>
